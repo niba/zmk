@@ -59,7 +59,7 @@ struct behavior_hold_tap_config {
     char *tap_behavior_dev;
     int quick_tap_ms;
     int require_prior_idle_ms;
-    int overlap_threshold; 
+    int overlap_threshold_ms; 
     enum flavor flavor;
     bool hold_while_undecided;
     bool hold_while_undecided_linger;
@@ -294,10 +294,10 @@ static void decide_balanced(struct active_hold_tap *hold_tap, enum decision_mome
         
         // If overlap threshold is enabled AND another key is currently pressed, 
         // don't decide yet - wait for HT_OTHER_KEY_UP to calculate overlap
-        if (hold_tap->config->overlap_threshold > 0 && 
+        if (hold_tap->config->overlap_threshold_ms > 0 && 
             hold_tap->other_key_press_timestamp > 0) {
             // Don't set status - wait for other key release to calculate overlap
-            hold_tap->status = STATUS_OVERLAP_PENDING;
+            /* hold_tap->status = STATUS_OVERLAP_PENDING; */
             return;
         } else {
             // No overlap threshold enabled OR no other key was pressed
@@ -310,22 +310,16 @@ static void decide_balanced(struct active_hold_tap *hold_tap, enum decision_mome
         return;
     case HT_OTHER_KEY_UP:
         // This is where we decide based on overlap threshold
-        if (hold_tap->config->overlap_threshold > 0 && 
+        if (hold_tap->config->overlap_threshold_ms > 0 && 
             hold_tap->release_timestamp > 0 && 
             hold_tap->other_key_press_timestamp > 0) {
             
             int64_t current_time = k_uptime_get();
-            int64_t other_key_duration = current_time - hold_tap->other_key_press_timestamp;
-            int64_t overlap_duration = hold_tap->release_timestamp - hold_tap->other_key_press_timestamp;
+            int64_t time_since_hold_tap_release = current_time - hold_tap->release_timestamp;
             
-            // Calculate overlap percentage
-            int overlap_percentage = 0;
-            if (other_key_duration > 0) {
-                overlap_percentage = (overlap_duration * 100) / other_key_duration;
-            }
             
             // Decide based on overlap threshold
-            if (overlap_percentage >= hold_tap->config->overlap_threshold) {
+            if (time_since_hold_tap_release <= hold_tap->config->overlap_threshold_ms) {
                 hold_tap->status = STATUS_HOLD_INTERRUPT;
                 /* LOG_DBG("%d overlap threshold met (%d%% >= %d%%), using hold",  */
                 /*         hold_tap->position, overlap_percentage, hold_tap->config->overlap_threshold); */
@@ -924,7 +918,7 @@ static int behavior_hold_tap_init(const struct device *dev) {
         .hold_while_undecided = DT_INST_PROP(n, hold_while_undecided),                             \
         .hold_while_undecided_linger = DT_INST_PROP(n, hold_while_undecided_linger),               \
         .retro_tap = DT_INST_PROP(n, retro_tap),                                                   \
-        .overlap_threshold = DT_INST_PROP_OR(n, overlap_threshold, 0),                             \
+        .overlap_threshold_ms = DT_INST_PROP_OR(n, overlap_threshold_ms, 0),                             \
         .hold_trigger_on_release = DT_INST_PROP(n, hold_trigger_on_release),                       \
         .hold_trigger_key_positions = DT_INST_PROP(n, hold_trigger_key_positions),                 \
         .hold_trigger_key_positions_len = DT_INST_PROP_LEN(n, hold_trigger_key_positions),         \
