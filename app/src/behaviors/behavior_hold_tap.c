@@ -90,6 +90,7 @@ struct active_hold_tap {
     const struct behavior_hold_tap_config *config;
     struct k_work_delayable work;
     bool work_is_cancelled;
+    bool physically_released_while_undecided;
 
     // initialized to -1, which is to be interpreted as "no other key has been pressed yet"
     int32_t position_of_first_other_key_pressed;
@@ -274,6 +275,7 @@ static struct active_hold_tap *store_hold_tap(struct zmk_behavior_binding_event 
         active_hold_taps[i].timestamp = event->timestamp;
         active_hold_taps[i].position_of_first_other_key_pressed = -1;
         active_hold_taps[i].release_timestamp = 0;
+        active_hold_taps[i].physically_released_while_undecided = false;
         active_hold_taps[i].other_key_press_timestamp = 0;
         return &active_hold_taps[i];
     }
@@ -296,8 +298,7 @@ static void decide_balanced(struct active_hold_tap *hold_tap, enum decision_mome
         // don't decide yet - wait for HT_OTHER_KEY_UP to calculate overlap
         if (hold_tap->config->overlap_threshold_ms > 0 && 
             hold_tap->other_key_press_timestamp > 0) {
-            // Don't set status - wait for other key release to calculate overlap
-            /* hold_tap->status = STATUS_OVERLAP_PENDING; */
+            hold_tap->status = STATUS_OVERLAP_PENDING;
             return;
         } else {
             // No overlap threshold enabled OR no other key was pressed
@@ -309,29 +310,26 @@ static void decide_balanced(struct active_hold_tap *hold_tap, enum decision_mome
         hold_tap->other_key_press_timestamp = k_uptime_get();
         return;
     case HT_OTHER_KEY_UP:
-        // This is where we decide based on overlap threshold
-        if (hold_tap->config->overlap_threshold_ms > 0 && 
-            hold_tap->release_timestamp > 0 && 
-            hold_tap->other_key_press_timestamp > 0) {
-            
-            int64_t current_time = k_uptime_get();
-            int64_t time_since_hold_tap_release = current_time - hold_tap->release_timestamp;
-            
-            
-            // Decide based on overlap threshold
-            if (time_since_hold_tap_release <= hold_tap->config->overlap_threshold_ms) {
-                hold_tap->status = STATUS_HOLD_INTERRUPT;
-                /* LOG_DBG("%d overlap threshold met (%d%% >= %d%%), using hold",  */
-                /*         hold_tap->position, overlap_percentage, hold_tap->config->overlap_threshold); */
-            } else {
-                hold_tap->status = STATUS_TAP;
-                /* LOG_DBG("%d overlap threshold not met (%d%% < %d%%), using tap",  */
-                /*         hold_tap->position, overlap_percentage, hold_tap->config->overlap_threshold); */
-            }
-        } else {
-            // Original balanced behavior (no overlap threshold or missing timestamps)
-            hold_tap->status = STATUS_HOLD_INTERRUPT;
-        }
+        hold_tap->status = STATUS_HOLD_INTERRUPT;
+        hold_tap->other_key_press_timestamp = 0;
+        /* if (hold_tap->config->overlap_threshold_ms > 0 &&  */
+        /*     hold_tap->release_timestamp > 0 &&  */
+        /*     hold_tap->other_key_press_timestamp > 0) { */
+        /**/
+        /*     hold_tap->other_key_press_timestamp = 0; */
+        /**/
+        /*     int64_t current_time = k_uptime_get(); */
+        /*     int64_t time_since_hold_tap_release = current_time - hold_tap->release_timestamp; */
+        /**/
+        /**/
+        /*     if (time_since_hold_tap_release <= hold_tap->config->overlap_threshold_ms) { */
+        /*         hold_tap->status = STATUS_HOLD_INTERRUPT; */
+        /*     } else { */
+        /*         hold_tap->status = STATUS_TAP; */
+        /*     } */
+        /* } else { */
+        /*     hold_tap->status = STATUS_HOLD_INTERRUPT; */
+        /* } */
         return;
     case HT_TIMER_EVENT:
         hold_tap->status = STATUS_HOLD_TIMER;
@@ -506,9 +504,7 @@ static int release_tap_binding(struct active_hold_tap *hold_tap) {
 static int press_binding(struct active_hold_tap *hold_tap) {
     if (hold_tap->config->retro_tap && hold_tap->status == STATUS_HOLD_TIMER) {
         return 0;
-    }
-    if (hold_tap->status == STATUS_OVERLAP_PENDING) {
-      return 0;
+
     }
 
     if (hold_tap->status == STATUS_HOLD_TIMER || hold_tap->status == STATUS_HOLD_INTERRUPT) {
@@ -606,11 +602,11 @@ static void decide_hold_tap(struct active_hold_tap *hold_tap,
         break;
     }
 
-    if (hold_tap->status == STATUS_UNDECIDED) {
+    if (hold_tap->status == STATUS_UNDECIDED || hold_tap->status == STATUS_OVERLAP_PENDING) {
         return;
     }
 
-    decide_positional_hold(hold_tap);
+    /* decide_positional_hold(hold_tap); */
 
     // Since the hold-tap has been decided, clean up undecided_hold_tap and
     // execute the decided behavior.
@@ -620,6 +616,23 @@ static void decide_hold_tap(struct active_hold_tap *hold_tap,
     undecided_hold_tap = NULL;
     press_binding(hold_tap);
     release_captured_events();
+
+    if (hold_tap->physically_released_while_undecided) {
+      hold_tap->physically_released_while_undecided = false; 
+      release_binding(hold_tap);       
+
+      if (hold_tap->config->hold_while_undecided && hold_tap->config->hold_while_undecided_linger) {
+        release_hold_binding(hold_tap);
+      }
+
+      int work_cancel_result = k_work_cancel_delayable(&hold_tap->work);
+
+      if (work_cancel_result == -EINPROGRESS) {
+        hold_tap->work_is_cancelled = true;
+      } else {
+        clear_hold_tap(hold_tap);
+      }
+    }
 }
 
 static void decide_retro_tap(struct active_hold_tap *hold_tap) {
@@ -696,6 +709,15 @@ static int on_hold_tap_binding_released(struct zmk_behavior_binding *binding,
         return ZMK_BEHAVIOR_OPAQUE;
     }
 
+    if (hold_tap->status == STATUS_OVERLAP_PENDING) {
+      decide_hold_tap(hold_tap, HT_KEY_UP);
+      decide_retro_tap(hold_tap);
+
+      hold_tap->physically_released_while_undecided = true;
+
+      return ZMK_BEHAVIOR_OPAQUE;
+    }
+
     // If these events were queued, the timer event may be queued too late or not at all.
     // We insert a timer event before the TH_KEY_UP event to verify.
     int work_cancel_result = k_work_cancel_delayable(&hold_tap->work);
@@ -705,6 +727,7 @@ static int on_hold_tap_binding_released(struct zmk_behavior_binding *binding,
 
     decide_hold_tap(hold_tap, HT_KEY_UP);
     decide_retro_tap(hold_tap);
+
     release_binding(hold_tap);
 
     if (hold_tap->config->hold_while_undecided && hold_tap->config->hold_while_undecided_linger) {
@@ -918,7 +941,7 @@ static int behavior_hold_tap_init(const struct device *dev) {
         .hold_while_undecided = DT_INST_PROP(n, hold_while_undecided),                             \
         .hold_while_undecided_linger = DT_INST_PROP(n, hold_while_undecided_linger),               \
         .retro_tap = DT_INST_PROP(n, retro_tap),                                                   \
-        .overlap_threshold_ms = DT_INST_PROP_OR(n, overlap_threshold_ms, 0),                             \
+        .overlap_threshold_ms = DT_INST_PROP(n, overlap_threshold_ms),                             \
         .hold_trigger_on_release = DT_INST_PROP(n, hold_trigger_on_release),                       \
         .hold_trigger_key_positions = DT_INST_PROP(n, hold_trigger_key_positions),                 \
         .hold_trigger_key_positions_len = DT_INST_PROP_LEN(n, hold_trigger_key_positions),         \
