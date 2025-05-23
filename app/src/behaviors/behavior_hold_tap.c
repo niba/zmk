@@ -40,6 +40,7 @@ enum status {
     STATUS_UNDECIDED,
     STATUS_TAP,
     STATUS_HOLD_INTERRUPT,
+    STATUS_OVERLAP_PENDING,
     STATUS_HOLD_TIMER,
 };
 
@@ -58,6 +59,7 @@ struct behavior_hold_tap_config {
     char *tap_behavior_dev;
     int quick_tap_ms;
     int require_prior_idle_ms;
+    int overlap_threshold; 
     enum flavor flavor;
     bool hold_while_undecided;
     bool hold_while_undecided_linger;
@@ -82,6 +84,8 @@ struct active_hold_tap {
     uint32_t param_hold;
     uint32_t param_tap;
     int64_t timestamp;
+    int64_t release_timestamp;
+    int64_t other_key_press_timestamp;
     enum status status;
     const struct behavior_hold_tap_config *config;
     struct k_work_delayable work;
@@ -269,6 +273,8 @@ static struct active_hold_tap *store_hold_tap(struct zmk_behavior_binding_event 
         active_hold_taps[i].param_tap = param_tap;
         active_hold_taps[i].timestamp = event->timestamp;
         active_hold_taps[i].position_of_first_other_key_pressed = -1;
+        active_hold_taps[i].release_timestamp = 0;
+        active_hold_taps[i].other_key_press_timestamp = 0;
         return &active_hold_taps[i];
     }
     return NULL;
@@ -283,10 +289,55 @@ static void clear_hold_tap(struct active_hold_tap *hold_tap) {
 static void decide_balanced(struct active_hold_tap *hold_tap, enum decision_moment event) {
     switch (event) {
     case HT_KEY_UP:
-        hold_tap->status = STATUS_TAP;
+     // Store when the hold-tap key was released
+        hold_tap->release_timestamp = k_uptime_get();
+        
+        // If overlap threshold is enabled AND another key is currently pressed, 
+        // don't decide yet - wait for HT_OTHER_KEY_UP to calculate overlap
+        if (hold_tap->config->overlap_threshold > 0 && 
+            hold_tap->other_key_press_timestamp > 0) {
+            // Don't set status - wait for other key release to calculate overlap
+            hold_tap->status = STATUS_OVERLAP_PENDING;
+            return;
+        } else {
+            // No overlap threshold enabled OR no other key was pressed
+            // Use original balanced behavior
+            hold_tap->status = STATUS_TAP;
+        }
+        return;
+    case HT_OTHER_KEY_DOWN:
+        hold_tap->other_key_press_timestamp = k_uptime_get();
         return;
     case HT_OTHER_KEY_UP:
-        hold_tap->status = STATUS_HOLD_INTERRUPT;
+        // This is where we decide based on overlap threshold
+        if (hold_tap->config->overlap_threshold > 0 && 
+            hold_tap->release_timestamp > 0 && 
+            hold_tap->other_key_press_timestamp > 0) {
+            
+            int64_t current_time = k_uptime_get();
+            int64_t other_key_duration = current_time - hold_tap->other_key_press_timestamp;
+            int64_t overlap_duration = hold_tap->release_timestamp - hold_tap->other_key_press_timestamp;
+            
+            // Calculate overlap percentage
+            int overlap_percentage = 0;
+            if (other_key_duration > 0) {
+                overlap_percentage = (overlap_duration * 100) / other_key_duration;
+            }
+            
+            // Decide based on overlap threshold
+            if (overlap_percentage >= hold_tap->config->overlap_threshold) {
+                hold_tap->status = STATUS_HOLD_INTERRUPT;
+                /* LOG_DBG("%d overlap threshold met (%d%% >= %d%%), using hold",  */
+                /*         hold_tap->position, overlap_percentage, hold_tap->config->overlap_threshold); */
+            } else {
+                hold_tap->status = STATUS_TAP;
+                /* LOG_DBG("%d overlap threshold not met (%d%% < %d%%), using tap",  */
+                /*         hold_tap->position, overlap_percentage, hold_tap->config->overlap_threshold); */
+            }
+        } else {
+            // Original balanced behavior (no overlap threshold or missing timestamps)
+            hold_tap->status = STATUS_HOLD_INTERRUPT;
+        }
         return;
     case HT_TIMER_EVENT:
         hold_tap->status = STATUS_HOLD_TIMER;
@@ -461,6 +512,9 @@ static int release_tap_binding(struct active_hold_tap *hold_tap) {
 static int press_binding(struct active_hold_tap *hold_tap) {
     if (hold_tap->config->retro_tap && hold_tap->status == STATUS_HOLD_TIMER) {
         return 0;
+    }
+    if (hold_tap->status == STATUS_OVERLAP_PENDING) {
+      return 0;
     }
 
     if (hold_tap->status == STATUS_HOLD_TIMER || hold_tap->status == STATUS_HOLD_INTERRUPT) {
@@ -870,6 +924,7 @@ static int behavior_hold_tap_init(const struct device *dev) {
         .hold_while_undecided = DT_INST_PROP(n, hold_while_undecided),                             \
         .hold_while_undecided_linger = DT_INST_PROP(n, hold_while_undecided_linger),               \
         .retro_tap = DT_INST_PROP(n, retro_tap),                                                   \
+        .overlap_threshold = DT_INST_PROP_OR(n, overlap_threshold, 0),                             \
         .hold_trigger_on_release = DT_INST_PROP(n, hold_trigger_on_release),                       \
         .hold_trigger_key_positions = DT_INST_PROP(n, hold_trigger_key_positions),                 \
         .hold_trigger_key_positions_len = DT_INST_PROP_LEN(n, hold_trigger_key_positions),         \

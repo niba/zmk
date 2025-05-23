@@ -22,6 +22,12 @@ properties:
   quick_tap_ms:
     type: int
     deprecated: true
+  overlap-threshold:
+    type: int
+    default: 0
+  overlap_threshold:
+    type: int
+    deprecated: true
   global-quick-tap:
     type: boolean
     deprecated: true
