@@ -606,7 +606,7 @@ static void decide_hold_tap(struct active_hold_tap *hold_tap,
         return;
     }
 
-    /* decide_positional_hold(hold_tap); */
+    decide_positional_hold(hold_tap);
 
     // Since the hold-tap has been decided, clean up undecided_hold_tap and
     // execute the decided behavior.
