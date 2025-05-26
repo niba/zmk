@@ -310,26 +310,24 @@ static void decide_balanced(struct active_hold_tap *hold_tap, enum decision_mome
         hold_tap->other_key_press_timestamp = k_uptime_get();
         return;
     case HT_OTHER_KEY_UP:
-        hold_tap->status = STATUS_HOLD_INTERRUPT;
-        hold_tap->other_key_press_timestamp = 0;
-        /* if (hold_tap->config->overlap_threshold_ms > 0 &&  */
-        /*     hold_tap->release_timestamp > 0 &&  */
-        /*     hold_tap->other_key_press_timestamp > 0) { */
-        /**/
-        /*     hold_tap->other_key_press_timestamp = 0; */
-        /**/
-        /*     int64_t current_time = k_uptime_get(); */
-        /*     int64_t time_since_hold_tap_release = current_time - hold_tap->release_timestamp; */
-        /**/
-        /**/
-        /*     if (time_since_hold_tap_release <= hold_tap->config->overlap_threshold_ms) { */
-        /*         hold_tap->status = STATUS_HOLD_INTERRUPT; */
-        /*     } else { */
-        /*         hold_tap->status = STATUS_TAP; */
-        /*     } */
-        /* } else { */
-        /*     hold_tap->status = STATUS_HOLD_INTERRUPT; */
-        /* } */
+        if (hold_tap->config->overlap_threshold_ms > 0 && 
+            hold_tap->release_timestamp > 0 && 
+            hold_tap->other_key_press_timestamp > 0) {
+
+            hold_tap->other_key_press_timestamp = 0;
+
+            int64_t current_time = k_uptime_get();
+            int64_t time_since_hold_tap_release = current_time - hold_tap->release_timestamp;
+
+
+            if (time_since_hold_tap_release <= hold_tap->config->overlap_threshold_ms) {
+                hold_tap->status = STATUS_HOLD_INTERRUPT;
+            } else {
+                hold_tap->status = STATUS_TAP;
+            }
+        } else {
+            hold_tap->status = STATUS_HOLD_INTERRUPT;
+        }
         return;
     case HT_TIMER_EVENT:
         hold_tap->status = STATUS_HOLD_TIMER;
@@ -504,7 +502,6 @@ static int release_tap_binding(struct active_hold_tap *hold_tap) {
 static int press_binding(struct active_hold_tap *hold_tap) {
     if (hold_tap->config->retro_tap && hold_tap->status == STATUS_HOLD_TIMER) {
         return 0;
-
     }
 
     if (hold_tap->status == STATUS_HOLD_TIMER || hold_tap->status == STATUS_HOLD_INTERRUPT) {
@@ -514,6 +511,7 @@ static int press_binding(struct active_hold_tap *hold_tap) {
         } else {
             return press_hold_binding(hold_tap);
         }
+
     } else {
         if (hold_tap->config->hold_while_undecided &&
             !hold_tap->config->hold_while_undecided_linger) {
@@ -538,6 +536,7 @@ static int release_binding(struct active_hold_tap *hold_tap) {
 
 static bool is_first_other_key_pressed_trigger_key(struct active_hold_tap *hold_tap) {
     for (int i = 0; i < hold_tap->config->hold_trigger_key_positions_len; i++) {
+        LOG_DBG("ht_custom_press key position %d = %d", hold_tap->config->hold_trigger_key_positions[i], hold_tap->position_of_first_other_key_pressed);
         if (hold_tap->config->hold_trigger_key_positions[i] ==
             hold_tap->position_of_first_other_key_pressed) {
             return true;
@@ -565,13 +564,14 @@ static void decide_positional_hold(struct active_hold_tap *hold_tap) {
         return;
     }
 
+    LOG_DBG("ht_custom_press forcing tap by positional hold");
     // Since the positional key conditions have failed, force a TAP decision.
     hold_tap->status = STATUS_TAP;
 }
 
 static void decide_hold_tap(struct active_hold_tap *hold_tap,
                             enum decision_moment decision_moment) {
-    if (hold_tap->status != STATUS_UNDECIDED) {
+    if (hold_tap->status != STATUS_UNDECIDED && hold_tap->status != STATUS_OVERLAP_PENDING) {
         return;
     }
 
@@ -586,6 +586,7 @@ static void decide_hold_tap(struct active_hold_tap *hold_tap,
         return;
     }
 
+    LOG_DBG("ht_custom_press moment=%s pos=%d", decision_moment_str(decision_moment), hold_tap->position);
     // If the hold-tap behavior is still undecided, attempt to decide it.
     switch (hold_tap->config->flavor) {
     case FLAVOR_HOLD_PREFERRED:
@@ -602,12 +603,21 @@ static void decide_hold_tap(struct active_hold_tap *hold_tap,
         break;
     }
 
-    if (hold_tap->status == STATUS_UNDECIDED || hold_tap->status == STATUS_OVERLAP_PENDING) {
+    if (hold_tap->status == STATUS_OVERLAP_PENDING) {
+      undecided_hold_tap->position_of_first_other_key_pressed = -1;
+      return;
+    }
+
+    if (hold_tap->status == STATUS_UNDECIDED) {
         return;
     }
 
     decide_positional_hold(hold_tap);
 
+    /* if (hold_tap->status == STATUS_OVERLAP_PENDING) { */
+    /*     LOG_DBG("ht_custom_press PENDING_STATUS"); */
+    /*     return; */
+    /* } */
     // Since the hold-tap has been decided, clean up undecided_hold_tap and
     // execute the decided behavior.
     LOG_DBG("%d decided %s (%s decision moment %s)", hold_tap->position,
@@ -619,11 +629,11 @@ static void decide_hold_tap(struct active_hold_tap *hold_tap,
 
     if (hold_tap->physically_released_while_undecided) {
       hold_tap->physically_released_while_undecided = false; 
-      release_binding(hold_tap);       
-
-      if (hold_tap->config->hold_while_undecided && hold_tap->config->hold_while_undecided_linger) {
-        release_hold_binding(hold_tap);
-      }
+      /* release_binding(hold_tap);        */
+      /**/
+      /* if (hold_tap->config->hold_while_undecided && hold_tap->config->hold_while_undecided_linger) { */
+      /*   release_hold_binding(hold_tap); */
+      /* } */
 
       int work_cancel_result = k_work_cancel_delayable(&hold_tap->work);
 
@@ -678,6 +688,7 @@ static int on_hold_tap_binding_pressed(struct zmk_behavior_binding *binding,
     struct active_hold_tap *hold_tap =
         store_hold_tap(&event, binding->param1, binding->param2, cfg);
 
+
     if (hold_tap == NULL) {
         LOG_ERR("unable to store hold-tap info, did you press more than %d hold-taps?",
                 ZMK_BHV_HOLD_TAP_MAX_HELD);
@@ -688,9 +699,11 @@ static int on_hold_tap_binding_pressed(struct zmk_behavior_binding *binding,
     undecided_hold_tap = hold_tap;
 
     if (is_quick_tap(hold_tap)) {
+    LOG_DBG("ht_custom_press where is quick tap");
         decide_hold_tap(hold_tap, HT_QUICK_TAP);
     }
 
+    LOG_DBG("ht_custom_press where is key down");
     decide_hold_tap(hold_tap, HT_KEY_DOWN);
 
     // if this behavior was queued we have to adjust the timer to only
@@ -709,15 +722,6 @@ static int on_hold_tap_binding_released(struct zmk_behavior_binding *binding,
         return ZMK_BEHAVIOR_OPAQUE;
     }
 
-    if (hold_tap->status == STATUS_OVERLAP_PENDING) {
-      decide_hold_tap(hold_tap, HT_KEY_UP);
-      decide_retro_tap(hold_tap);
-
-      hold_tap->physically_released_while_undecided = true;
-
-      return ZMK_BEHAVIOR_OPAQUE;
-    }
-
     // If these events were queued, the timer event may be queued too late or not at all.
     // We insert a timer event before the TH_KEY_UP event to verify.
     int work_cancel_result = k_work_cancel_delayable(&hold_tap->work);
@@ -728,12 +732,21 @@ static int on_hold_tap_binding_released(struct zmk_behavior_binding *binding,
     decide_hold_tap(hold_tap, HT_KEY_UP);
     decide_retro_tap(hold_tap);
 
+    if (hold_tap->status == STATUS_OVERLAP_PENDING) {
+      LOG_DBG("ht_custom_press PENDING binding_released");
+      hold_tap->physically_released_while_undecided = true;
+
+      release_hold_binding(hold_tap);
+      return ZMK_BEHAVIOR_OPAQUE;
+    }
+
     release_binding(hold_tap);
 
     if (hold_tap->config->hold_while_undecided && hold_tap->config->hold_while_undecided_linger) {
         release_hold_binding(hold_tap);
     }
 
+    LOG_DBG("ht_custom_press cleaning hold-tap binding_released");
     if (work_cancel_result == -EINPROGRESS) {
         // let the timer handler clean up
         // if we'd clear now, the timer may call back for an uninitialized active_hold_tap.
@@ -812,6 +825,7 @@ static int position_state_changed_listener(const zmk_event_t *eh) {
         && (undecided_hold_tap->position_of_first_other_key_pressed ==
             -1) // no other key has been pressed yet
     ) {
+        LOG_DBG("ht_custom_press position of first other key");
         undecided_hold_tap->position_of_first_other_key_pressed = ev->position;
     }
 
