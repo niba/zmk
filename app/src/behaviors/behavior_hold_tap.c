@@ -28,6 +28,14 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 // increase if you have keyboard with more keys.
 #define ZMK_BHV_HOLD_TAP_POSITION_NOT_USED 9999
+#ifndef MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
+
+#ifndef MAX  
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#endif
+
 
 enum flavor {
     FLAVOR_HOLD_PREFERRED,
@@ -85,6 +93,7 @@ struct active_hold_tap {
     uint32_t param_tap;
     int64_t timestamp;
     int64_t release_timestamp;
+    int64_t press_timestamp;
     int64_t other_key_press_timestamp;
     enum status status;
     const struct behavior_hold_tap_config *config;
@@ -275,6 +284,7 @@ static struct active_hold_tap *store_hold_tap(struct zmk_behavior_binding_event 
         active_hold_taps[i].timestamp = event->timestamp;
         active_hold_taps[i].position_of_first_other_key_pressed = -1;
         active_hold_taps[i].release_timestamp = 0;
+        active_hold_taps[i].press_timestamp = 0;
         active_hold_taps[i].physically_released_while_undecided = false;
         active_hold_taps[i].other_key_press_timestamp = 0;
         return &active_hold_taps[i];
@@ -309,18 +319,37 @@ static void decide_balanced(struct active_hold_tap *hold_tap, enum decision_mome
     case HT_OTHER_KEY_DOWN:
         hold_tap->other_key_press_timestamp = k_uptime_get();
         return;
+    case HT_KEY_DOWN:
+      hold_tap->press_timestamp = k_uptime_get();
+      return;
     case HT_OTHER_KEY_UP:
         if (hold_tap->config->overlap_threshold_ms > 0 && 
             hold_tap->release_timestamp > 0 && 
             hold_tap->other_key_press_timestamp > 0) {
-
-            hold_tap->other_key_press_timestamp = 0;
-
-            int64_t current_time = k_uptime_get();
-            int64_t time_since_hold_tap_release = current_time - hold_tap->release_timestamp;
-
-
-            if (time_since_hold_tap_release <= hold_tap->config->overlap_threshold_ms) {
+            
+            int64_t homerow_press_time = hold_tap->press_timestamp;  // This is the missing piece!
+            int64_t homerow_release_time = hold_tap->release_timestamp;
+            int64_t other_key_press_time = hold_tap->other_key_press_timestamp;
+            int64_t other_key_release_time = k_uptime_get();  // Current time = other key release
+            
+            // Calculate overlap duration
+            int64_t overlap_start = MAX(homerow_press_time, other_key_press_time);
+            int64_t overlap_end = MIN(homerow_release_time, other_key_release_time);
+            int64_t overlap_duration = MAX(0, overlap_end - overlap_start);
+            
+            // Calculate total duration of the shorter key
+            int64_t homerow_duration = homerow_release_time - homerow_press_time;
+            int64_t other_key_duration = other_key_release_time - other_key_press_time;
+            int64_t shorter_duration = MIN(homerow_duration, other_key_duration);
+            
+            // Calculate overlap percentage
+            int overlap_percentage = 0;
+            if (shorter_duration > 0) {
+                overlap_percentage = (overlap_duration * 100) / shorter_duration;
+            }
+            LOG_DBG("ht_custom_press position keys overlap is %d", overlap_percentage);
+            // Decide based on overlap threshold
+            if (overlap_percentage >= hold_tap->config->overlap_threshold_ms) {
                 hold_tap->status = STATUS_HOLD_INTERRUPT;
             } else {
                 hold_tap->status = STATUS_TAP;
